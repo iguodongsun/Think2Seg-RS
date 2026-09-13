@@ -45,7 +45,6 @@ from trl.data_utils import apply_chat_template, is_conversational, maybe_apply_c
 from trl.models import create_reference_model, prepare_deepspeed, unwrap_model_for_generation
 from trl.trainer.grpo_config import GRPOConfig
 from trl.trainer.utils import generate_model_card, get_comet_experiment_url
-from trl import GRPOTrainer
 
 from accelerate.utils import is_peft_model, set_seed
 import PIL.Image
@@ -249,15 +248,10 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
                 "Invalid `torch_dtype` passed to `GRPOConfig`. Expected either 'auto' or a string representing "
                 f"a `torch.dtype` (e.g., 'float32'), but got {torch_dtype}."
             )
-        model_init_kwargs["use_cache"] = (
-            False if args.gradient_checkpointing else model_init_kwargs.get("use_cache")
-        )
-            # Disable caching if gradient checkpointing is enabled (not supported)
-        model_init_kwargs["use_cache"] = (
-            False if args.gradient_checkpointing else model_init_kwargs.get("use_cache")
-        )
+        use_cache = not args.gradient_checkpointing
         model_cls = self.vlm_module.get_model_class(model_id, model_init_kwargs)
         model = model_cls.from_pretrained(model_id, **model_init_kwargs)
+        model.config.use_cache = use_cache
 
         # LoRA
         self.vision_modules_keywords = self.vlm_module.get_vision_modules_keywords()
@@ -388,7 +382,8 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
         # "Could not estimate the number of tokens of the input, floating-point operations will not be computed." To
         # suppress this warning, we set the "estimate_tokens" key in the model's "warnings_issued" dictionary to True.
         # This acts as a flag to indicate that the warning has already been issued.
-        model.warnings_issued["estimate_tokens"] = True
+        if hasattr(model, "warnings_issued"):
+            model.warnings_issued["estimate_tokens"] = True
 
         # Initialize the metrics
         self._metrics = defaultdict(list)
@@ -848,7 +843,7 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
 
         model_card.save(os.path.join(self.args.output_dir, "README.md"))
 
-    def _get_train_sampler(self) -> Sampler:
+    def _get_train_sampler(self, train_dataset=None) -> Sampler:
         """Returns a sampler that ensures proper data sampling for GRPO training."""
         effective_batch_size = (
             self.args.per_device_train_batch_size
@@ -857,17 +852,17 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
         )
         
         return RepeatRandomSampler(
-            data_source=self.train_dataset,
+            data_source=train_dataset if train_dataset is not None else self.train_dataset,
             mini_repeat_count=self.num_generations,
             batch_size=effective_batch_size // self.num_generations,
             repeat_count=self.num_iterations,
             seed=self.args.seed,
         )
 
-    def _get_eval_sampler(self, eval_dataset) -> Sampler:
+    def _get_eval_sampler(self, eval_dataset=None) -> Sampler:
         """Returns a sampler for evaluation."""
         return RepeatRandomSampler(
-            data_source=eval_dataset,
+            data_source=eval_dataset if eval_dataset is not None else self.eval_dataset,
             mini_repeat_count=self.num_generations,
             seed=self.args.seed,
         )
@@ -1041,5 +1036,3 @@ class Geo_VLMGRPOTrainer_ultra(Trainer):
             self._metrics["think_completion_length"].append(avg_think_completion_length)
         except:
             pass
-
-

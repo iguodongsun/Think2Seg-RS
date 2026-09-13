@@ -13,9 +13,10 @@ class Qwen2VLModule(VLMBaseModule):
         return "qwen"
 
     def get_model_class(self, model_id: str, model_init_kwargs: dict):
-        if "Qwen2-VL" in model_id:
+        normalized_id = model_id.lower()
+        if "qwen2-vl" in normalized_id:
             model_cls = Qwen2VLForConditionalGeneration
-        elif "Qwen2.5-VL" in model_id:
+        elif "qwen2.5-vl" in normalized_id or "think2seg-rs" in normalized_id:
             model_cls = Qwen2_5_VLForConditionalGeneration
         else:
             raise ValueError(f"Unsupported model: {model_id}")

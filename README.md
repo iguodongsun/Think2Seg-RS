@@ -107,6 +107,33 @@ cd src/eval
 bash run_think2seg-rs_rrsisd-zero-shot.sh
 ```
 
+### OVS44Reason two-GPU smoke test
+
+See [OVS44Reason_GUIDE.md](OVS44Reason_GUIDE.md) for the combined three-model guide.
+
+The adapter validates the `rgb`, `text`, and `D2mask` correspondence and pairs each
+question with the answer at the same list index. The evaluator runs one
+Think2Seg-RS plus SAM2 pipeline per GPU and selects distinct masks for the sample.
+
+```bash
+cd /home/Think2Seg-RS
+./run_ovs44_smoke_2gpu.sh
+```
+
+Override `DATA_ROOT`, `MODEL_PATH`, `SAM_ROOT`, `OUTPUT_DIR`, or `MAX_SAMPLES` when
+needed. The default result is written to
+`/root/autodl-tmp/think2seg-rs/ovs44_smoke/metrics.json`.
+
+The GRPO training smoke test uses two GPUs, LoRA, frozen vision modules, four
+generations per prompt, and two gradient accumulation steps:
+
+```bash
+./run_ovs44_train_smoke_2gpu.sh
+```
+
+Set `GRAD_ACCUM` to change gradient accumulation. The LoRA adapter and training
+report are written to `/root/autodl-tmp/think2seg-rs/ovs44_train_smoke`.
+
 <!-- ## 👁️ Visualizasion -->
 
 

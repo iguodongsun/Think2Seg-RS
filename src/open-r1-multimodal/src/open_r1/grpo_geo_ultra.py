@@ -14,6 +14,7 @@
 
 import os
 import re
+import json
 import pathlib
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -23,8 +24,15 @@ from trl import ModelConfig, ScriptArguments, TrlParser, get_peft_config
 
 from open_r1.vlm_modules import *
 
-# ----------------------- Fix the flash attention bug in the current version of transformers -----------------------
-from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import Qwen2_5_VLVisionFlashAttention2, apply_rotary_pos_emb_flashatt, flash_attn_varlen_func
+# ----------------------- Fix the flash attention bug in affected transformers versions -----------------------
+try:
+    from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
+        Qwen2_5_VLVisionFlashAttention2,
+        apply_rotary_pos_emb_flashatt,
+        flash_attn_varlen_func,
+    )
+except ImportError:
+    Qwen2_5_VLVisionFlashAttention2 = None
 import torch
 import numpy as np
 from typing import Tuple
@@ -71,7 +79,8 @@ def custom_forward(
         attn_output = self.proj(attn_output)
         return attn_output
 
-Qwen2_5_VLVisionFlashAttention2.forward = custom_forward
+if Qwen2_5_VLVisionFlashAttention2 is not None:
+    Qwen2_5_VLVisionFlashAttention2.forward = custom_forward
 
 @dataclass
 class GRPOScriptArguments(ScriptArguments):
@@ -144,6 +153,10 @@ class GRPOScriptArguments(ScriptArguments):
         default=840,  # Default resize size for EarthReason dataset
         metadata={"help": "Resize size for EarthReason dataset images"},
     )
+    ovs44_manifest: Optional[str] = field(
+        default="",
+        metadata={"help": "Query-level OVS44Reason manifest"},
+    )
 
 
 
@@ -173,7 +186,8 @@ class GRPOModelConfig(ModelConfig):
 
 
 def get_vlm_module(model_name_or_path):
-    if "qwen" in model_name_or_path.lower():
+    if ("qwen" in model_name_or_path.lower()
+            or "think2seg-rs" in model_name_or_path.lower()):
         return Qwen2VLModule
     elif "internvl" in model_name_or_path.lower():
         return InvernVLModule
@@ -223,6 +237,13 @@ def main(script_args, training_args, model_args):
                                                  split=['train'],
                                                  resize_size=script_args.earthreason_resize_size)
         available_datasets.append(earthreason_dataset)
+    if 'ovs44' in datasets_to_use:
+        from open_r1.dataset.OVS44Reason_datasets import OVS44ReasonDataset
+        print(f"Loading OVS44Reason dataset from {script_args.ovs44_manifest}...")
+        available_datasets.append(OVS44ReasonDataset(
+            manifest=script_args.ovs44_manifest,
+            resize_size=script_args.earthreason_resize_size,
+        ))
     # if 'refsegrs' in datasets_to_use:
     #     from open_r1.dataset.RefSegRS_datasets import RefSegRSDataset
     #     print(f"Loading RefSegRS dataset from {script_args.refsegrs_root}...")
@@ -293,9 +314,45 @@ def main(script_args, training_args, model_args):
 
     # Train and push the model to the Hub
     if list(pathlib.Path(training_args.output_dir).glob("checkpoint-*")):
-        trainer.train(resume_from_checkpoint=True)
+        train_result = trainer.train(resume_from_checkpoint=True)
     else:
-        trainer.train()
+        train_result = trainer.train()
+
+    rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+    world_size = (
+        torch.distributed.get_world_size() if torch.distributed.is_initialized() else 1
+    )
+    lora_b_max = max(
+        (
+            float(parameter.detach().float().abs().max())
+            for name, parameter in trainer.model.named_parameters()
+            if "lora_B" in name
+        ),
+        default=0.0,
+    )
+    local_report = {
+        "rank": rank,
+        "peak_memory_mib": torch.cuda.max_memory_allocated() / (1024 ** 2),
+        "lora_b_max_abs": lora_b_max,
+        "train_metrics": train_result.metrics,
+        "log_history": trainer.state.log_history,
+    }
+    gathered = [None] * world_size
+    if torch.distributed.is_initialized():
+        torch.distributed.all_gather_object(gathered, local_report)
+    else:
+        gathered = [local_report]
+    if rank == 0:
+        report = {
+            "world_size": world_size,
+            "gradient_accumulation_steps": training_args.gradient_accumulation_steps,
+            "optimizer_steps": trainer.state.global_step,
+            "ranks": gathered,
+        }
+        report_path = pathlib.Path(training_args.output_dir) / "train_metrics.json"
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+        print(json.dumps(report, indent=2))
 
     # Save and push to hub
     trainer.save_model(training_args.output_dir)
